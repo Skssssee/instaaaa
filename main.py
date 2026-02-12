@@ -1,110 +1,85 @@
+
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
-import requests
-import re
+import httpx
+import random
 
-app = FastAPI(title="SnapInsta Private API")
+app = FastAPI()
 
-# Request Model for JSON input
-class VideoRequest(BaseModel):
-    url: str
+# --- Configuration from your provided sources ---
+PROVIDERS = {
+    "tiktok": [
+        "tiktokio", "snaptik", "tmate", "ssstik", "tikmate", "savett", 
+        "sstik", "ttdownloader", "tiktokdownload", "lovetik"
+    ],
+    "insta": [
+        "ytdownload", "thesocialcat", "sssinstagram", "igram", "fsmvid", 
+        "snapdownloader", "instasave", "nuelink", "postsyncer", "reelsnap", "indown"
+    ],
+    "facebook": [
+        "fbdown", "getfb", "socialplug", "fbvideodl", "solyptube", "fsmvid", 
+        "fdownload", "fdownloader", "postsyncer", "f-down", "ytdownload"
+    ],
+    "spotify": [
+        "spotisongdownloader", "spotisaver", "spowload", "spotmate"
+    ],
+    "youtube": [
+        "flvto", "savenow", "ytdownload", "ytdown", "yt1s"
+    ]
+}
 
-# --- CORE LOGIC ---
-def get_snapinsta_link(target_link: str):
-    """
-    Sends the request to SnapInsta.top using the specific Multipart structure.
-    """
-    url = "https://snapinsta.top/action.php"
+BASE_URLS = {
+    "tiktok": "https://tiktok-dlx.vercel.app/api",
+    "insta": "https://insta-dlx.vercel.app/api",
+    "facebook": "https://fb-dlx.vercel.app/api",
+    "spotify": "https://spoti-dlx.vercel.app/api",
+    "youtube": "https://yt-dlx.vercel.app/api"
+}
 
-    # Headers from your capture
-    # Note: We do NOT set 'Content-Type' manually here; 'requests' sets it automatically for multipart
-    headers = {
-        "Host": "snapinsta.top",
-        "User-Agent": "Mozilla/5.0 (Linux; Android 15; RMX3870 Build/AP3A.240617.008) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.7559.59 Mobile Safari/537.36",
-        "Origin": "https://snapinsta.top",
-        "Referer": "https://snapinsta.top/",
-        "X-Requested-With": "XMLHttpRequest",  # Important for AJAX requests
-        "Accept": "*/*",
-        "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
-    }
+def detect_platform(url: str):
+    url = url.lower()
+    if "tiktok.com" in url: return "tiktok"
+    if "instagram.com" in url or "instagr.am" in url: return "insta"
+    if "facebook.com" in url or "fb.watch" in url: return "facebook"
+    if "spotify.com" in url: return "spotify"
+    if "youtube.com" in url or "youtu.be" in url: return "youtube"
+    return None
 
-    # Session Cookie (Required)
-    # If this expires, you must capture a new PHPSESSID from your browser/sniffer
-    cookies = {
-        "PHPSESSID": "vhv8e7avhmjv7meft3qtqorn6g"
-    }
+def extract_best_link(data):
+    keys = ["no_watermark_hd", "no_watermark", "download_link", "video", "url", "audio"]
+    for key in keys:
+        val = data.get(key)
+        if val and isinstance(val, str) and len(val) > 10 and val != "/":
+            return val
+    if "responseFinal" in data:
+        links = data["responseFinal"].get("links", [])
+        if links: return links[0].get("url")
+    return None
 
-    # Data Payload (Multipart)
-    # Passed as 'files' to ensure correct multipart/form-data encoding
-    files = {
-        'url': (None, target_link),
-        'action': (None, 'post'),
-        'lang': (None, 'en')
-    }
+@app.get("/download")
+async def download(url: str = Query(...)):
+    platform = detect_platform(url)
+    if not platform:
+        raise HTTPException(status_code=400, detail="Platform not supported.")
 
-    try:
-        # Send POST request
-        response = requests.post(url, headers=headers, cookies=cookies, files=files, timeout=15)
+    provider_list = PROVIDERS[platform].copy()
+    random.shuffle(provider_list)
 
-        if response.status_code == 200:
-            response_text = response.text
-            
-            # Regex to find the download link (dl.php?token=...)
-            match = re.search(r'dl\.php\?token=[^"\']+', response_text)
-            
-            if match:
-                token_part = match.group(0)
-                # Ensure we have the full URL
-                if "https" not in token_part:
-                    return f"https://snapinsta.top/{token_part}"
-                else:
-                    return token_part
-            
-            # Fallback: Sometimes it gives a direct link (googlevideo, etc.)
-            match_direct = re.search(r'href=["\'](https://[^"\']*googlevideo[^"\']*)["\']', response_text)
-            if match_direct:
-                return match_direct.group(1)
+    async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
+        for service in provider_list:
+            try:
+                response = await client.get(f"{BASE_URLS[platform]}/{service}", params={"url": url})
+                if response.status_code == 200:
+                    data = response.json()
+                    dl_link = extract_best_link(data)
+                    if dl_link:
+                        return {
+                            "success": True,
+                            "platform": platform,
+                            "provider": service,
+                            "title": data.get("title") or "Media File",
+                            "download_url": dl_link,
+                            "full_details": data 
+                        }
+            except: continue
 
-            print("Debug: No link found in response.")
-            return None
-        else:
-            print(f"Server Error: {response.status_code}")
-            return None
-
-    except Exception as e:
-        print(f"Exception: {e}")
-        return None
-
-# --- ENDPOINT 1: Get JSON (For Apps/Bots) ---
-@app.post("/api/get-link")
-async def get_link(video: VideoRequest):
-    """
-    Send JSON body: {"url": "https://instagram..."}
-    Returns JSON: {"download_url": "..."}
-    """
-    download_url = get_snapinsta_link(video.url)
-    
-    if download_url:
-        return {"status": "success", "download_url": download_url}
-    else:
-        raise HTTPException(status_code=400, detail="Could not extract video link. Session may be expired.")
-
-# --- ENDPOINT 2: Direct Download (For Browsers) ---
-@app.get("/api/download")
-async def download_video(url: str = Query(..., description="The Instagram URL")):
-    """
-    Visit: http://localhost:8000/api/download?url=YOUR_INSTA_LINK
-    This will redirect you immediately to the video file.
-    """
-    download_url = get_snapinsta_link(url)
-    
-    if download_url:
-        return RedirectResponse(url=download_url)
-    else:
-        raise HTTPException(status_code=400, detail="Could not fetch video.")
-
-if __name__ == "__main__":
-    import uvicorn
-    # Run on localhost port 8000
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    raise HTTPException(status_code=502, detail="All engines failed.")
