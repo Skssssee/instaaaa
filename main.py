@@ -1,31 +1,16 @@
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
 import httpx
 import asyncio
 
 app = FastAPI()
 
-# --- Full Configuration from your Screenshots ---
+# --- All Providers from your Screenshots ---
 PROVIDERS = {
-    "tiktok": [
-        "tmate", "snaptik", "savett", "thesocialcat", "tiktokio", 
-        "ssstik", "sstik", "tikmate", "ttdownloader", "tiktokdownload", 
-        "lovetik", "watermarkremover"
-    ], #
-    "insta": [
-        "thesocialcat", "sssinstagram", "igram", "fsmvid", "snapdownloader", 
-        "instasave", "nuelink", "postsyncer", "reelsnap", "indown", "ytdownload"
-    ], #
-    "facebook": [
-        "fbdown", "getfb", "socialplug", "fbvideodl", "solyptube", "fsmvid", 
-        "fdownload", "fdownloader", "postsyncer", "f-down", "ytdownload"
-    ], #
-    "spotify": [
-        "spotisongdownloader", "spotisaver", "spowload", "spotmate"
-    ], #
-    "youtube": [
-        "flvto", "savenow", "ytdownload", "ytdown", "yt1s"
-    ] #
+    "tiktok": ["tmate", "snaptik", "savett", "thesocialcat", "tiktokio", "ssstik", "sstik", "tikmate", "ttdownloader", "tiktokdownload", "lovetik", "watermarkremover"], #
+    "insta": ["ytdownload", "thesocialcat", "sssinstagram", "igram", "fsmvid", "snapdownloader", "instasave", "nuelink", "postsyncer", "reelsnap", "indown"], #
+    "facebook": ["fbdown", "getfb", "socialplug", "fbvideodl", "solyptube", "fsmvid", "fdownload", "fdownloader", "postsyncer", "f-down", "ytdownload"], #
+    "spotify": ["spotisongdownloader", "spotisaver", "spowload", "spotmate"], #
+    "youtube": ["flvto", "savenow", "ytdownload", "ytdown", "yt1s"] #
 }
 
 BASE_URLS = {
@@ -36,43 +21,64 @@ BASE_URLS = {
     "youtube": "https://yt-dlx.vercel.app/api"
 }
 
-def detect_platform(url: str):
-    u = url.lower()
-    if "tiktok.com" in u: return "tiktok"
-    if "instagram.com" in u or "instagr.am" in u: return "insta"
-    if "facebook.com" in u or "fb.watch" in u: return "facebook"
-    if "spotify.com" in u: return "spotify"
-    if "youtube.com" in u or "youtu.be" in u: return "youtube"
+def extract_clean_link(data):
+    """Watermarked links ko laat maarta hai aur sirf clean links nikaalta hai."""
+    if not data or not isinstance(data, dict): return None
+    
+    # 1. TikTok/General: HD priority
+    for key in ["no_watermark_hd", "no_watermark", "download_link", "video", "url"]:
+        link = data.get(key)
+        if link and isinstance(link, str) and len(link) > 10 and link != "/":
+            # Strict Filter: Agar link mein 'watermark' word hai (par 'no_' nahi), toh reject
+            if "watermark" in link.lower() and "no_watermark" not in link.lower() and "no-watermark" not in link.lower():
+                continue
+            return link
+
+    # 2. Instagram Specific: responseFinal structure
+    res_final = data.get("data", {}).get("responseFinal", {}) if isinstance(data.get("data"), dict) else data.get("responseFinal", {})
+    if res_final and isinstance(res_final, dict):
+        if res_final.get("videoUrl"): return res_final["videoUrl"]
+        formats = res_final.get("formats", [])
+        if formats: return formats[0].get("url")
+
     return None
 
-@app.get("/", response_class=HTMLResponse)
-async def docs():
-    return "<h1>Mega API Online</h1><p>Use <code>/download?url=YOUR_URL</code></p>"
-
 @app.get("/download")
-async def aggregate_all(url: str = Query(...)):
-    platform = detect_platform(url)
-    if not platform:
-        raise HTTPException(status_code=400, detail="Platform not supported.")
+async def aggregate(url: str = Query(...)):
+    u = url.lower()
+    platform = None
+    if "tiktok.com" in u: platform = "tiktok"
+    elif "inst" in u: platform = "insta"
+    elif "facebook.com" in u or "fb.watch" in u: platform = "facebook"
+    elif "spotify.com" in u: platform = "spotify"
+    elif "youtube.com" in u or "youtu.be" in u: platform = "youtube"
 
-    base = BASE_URLS[platform]
+    if not platform:
+        raise HTTPException(status_code=400, detail="URL support nahi hai.")
+
     services = PROVIDERS[platform]
+    base = BASE_URLS[platform]
     
     async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
-        # Ek saath saare providers ko call karega
         tasks = [client.get(f"{base}/{s}", params={"url": url}) for s in services]
         responses = await asyncio.gather(*tasks, return_exceptions=True)
         
-        aggregated_results = {}
+        full_json = {}
+        best_link = None
+        
         for i, res in enumerate(responses):
             svc = services[i]
             if isinstance(res, httpx.Response) and res.status_code == 200:
-                aggregated_results[svc] = res.json()
+                data = res.json()
+                full_json[svc] = data
+                if not best_link:
+                    best_link = extract_clean_link(data)
             else:
-                aggregated_results[svc] = {"status": "failed", "msg": str(res)}
+                full_json[svc] = {"status": "failed"}
 
     return {
         "success": True,
         "platform": platform,
-        "results": aggregated_results # Isme poora JSON milega har provider ka
-    }
+        "clean_download_url": best_link,
+        "all_results": full_json
+            }
